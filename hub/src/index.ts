@@ -31,13 +31,15 @@ interface ToolResult {
 type JsonRpcRequest = { jsonrpc: "2.0"; id?: string | number | null; method: string; params?: any };
 
 const SERVER_NAME = "claude-interact-hub";
-const SERVER_VERSION = "0.3.0";
+const SERVER_VERSION = "0.4.0";
 const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const MACHINE_NAME_RE = /^[A-Za-z0-9-]{1,24}$/;
 const SEP = "__";
 // Upper bound on how long the hub waits for an agent to answer a tool call. Agent tools that
 // can run long (Claude sessions) take their own wait_seconds and return early with a status.
 const CALL_TIMEOUT_MS = 150_000;
+// Machines offline longer than this are forgotten (tools and all); an agent re-registers on reconnect.
+const STALE_MS = 3 * 24 * 60 * 60 * 1000;
 
 const INSTRUCTIONS = `This connector reaches the user's own computers ("machines"). Each machine runs an agent that
 registers tools, exposed here as <machine>${SEP}<tool>. Call list_machines first to see which machines
@@ -190,7 +192,10 @@ export class Hub extends DurableObject<Env> {
 
   private async machines(): Promise<MachineRecord[]> {
     const map = await this.ctx.storage.list<MachineRecord>({ prefix: "machine:" });
-    return [...map.values()].sort((a, b) => a.machine.localeCompare(b.machine));
+    const now = Date.now();
+    const stale = [...map.values()].filter((m) => now - m.lastSeen > STALE_MS && !this.socketFor(m.machine));
+    if (stale.length) await this.ctx.storage.delete(stale.map((m) => `machine:${m.machine}`));
+    return [...map.values()].filter((m) => !stale.includes(m)).sort((a, b) => a.machine.localeCompare(b.machine));
   }
 
   private callAgent(machine: string, tool: string, args: unknown): Promise<ToolResult> {
@@ -279,6 +284,17 @@ export class Hub extends DurableObject<Env> {
           additionalProperties: false,
         },
       },
+      {
+        name: "forget_machine",
+        description:
+          "Remove an offline machine and its tools from this connector (for example a test agent). Machines offline for 3 days are forgotten on their own; a forgotten machine re-registers if its agent connects again.",
+        inputSchema: {
+          type: "object",
+          properties: { machine: { type: "string", description: "Machine name from list_machines." } },
+          required: ["machine"],
+          additionalProperties: false,
+        },
+      },
     ];
     for (const m of await this.machines()) {
       for (const t of m.tools) {
@@ -309,6 +325,14 @@ export class Hub extends DurableObject<Env> {
         return textResult("run_machine_tool needs machine and tool.", true);
       }
       return this.callAgent(args.machine, args.tool, args.arguments ?? {});
+    }
+
+    if (name === "forget_machine") {
+      const machine = args?.machine;
+      if (typeof machine !== "string") return textResult("forget_machine needs machine.", true);
+      if (this.socketFor(machine)) return textResult(`Machine "${machine}" is online; stop its agent first.`, true);
+      if (!(await this.ctx.storage.delete(`machine:${machine}`))) return textResult(`No machine "${machine}".`, true);
+      return textResult(`Forgot machine "${machine}".`);
     }
 
     const i = name.indexOf(SEP);

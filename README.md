@@ -11,7 +11,7 @@ Claude Duet ──MCP over HTTPS──▶ hub (Cloudflare Worker + Durable Objec
                          claude -p / --resume
 ```
 
-- **hub/** is the connector you add in Claude. It holds a WebSocket from each machine and exposes each machine's tools as `<machine>__<tool>`, plus `list_machines` and `run_machine_tool` (for machines that connected after Duet loaded its tool list).
+- **hub/** is the connector you add in Claude. It holds a WebSocket from each machine and exposes each machine's tools as `<machine>__<tool>`, plus `list_machines`, `run_machine_tool` (for machines that connected after Duet loaded its tool list) and `forget_machine` (removes an offline machine, such as a test agent). Machines offline for 3 days are dropped on their own and re-register when their agent reconnects.
 - **agent/** runs on each machine. Single file, no dependencies, Node 22+. Each agent declares its own tools, so different machines can offer different tools through the same connector.
 
 ## Tools each agent offers today
