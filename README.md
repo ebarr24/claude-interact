@@ -28,7 +28,9 @@ Claude Duet ──MCP over HTTPS──▶ hub (Cloudflare Worker + Durable Objec
 
 ### Where the work runs
 
-Every run the connector starts or continues uses **auto mode** unless the call names another `permission_mode`. A desktop chat that already exists keeps its own mode.
+Every run the connector starts or continues uses **auto mode** unless the call names another `permission_mode`. A desktop chat that already exists keeps its own mode; nothing outside the app can change it.
+
+When the desktop app adds a chat to its sidebar, it takes the mode of the last prompt in the final 256 KB of the transcript. If no prompt falls in that window, which is common after a long background run, it uses `permissions.defaultMode` from your Claude settings, or manual mode if that isn't set. Set `"permissions": { "defaultMode": "auto" }` in `~/.claude/settings.json` so those chats open in auto too. The agent warns at startup when that setting isn't `auto`, and a run's result includes `desktop_mode` when the app opened its chat in a mode other than auto.
 
 - **`background`** (the default): a headless `claude -p` run on the machine, saved to the chat. Faster, and doesn't depend on the relay. No desktop-only tools. When it finishes, the chat (or fork) is added to the desktop app's sidebar so every connector run can be reviewed there; this opens the app on that chat.
 - **`desktop`** (chosen deliberately): the chat is a full Claude desktop app chat, with the app's own tools such as the built-in browser. A message to a chat the app already has loaded always goes here.
@@ -84,7 +86,7 @@ Needs Node 22+ (24 tested) and, for desktop chats, the Claude desktop app signed
      - `relayClaudeCommand`: the CLI for relaying (needs 2.1.234+ on Windows).
      - `defaultWhere`: `background` (default) or `desktop`.
      - `desktopDefaults`: `{ "model", "effort", "permissionMode" }` for new desktop chats.
-     - `showRunsInDesktop`: add background and forked chats to the desktop app's sidebar when they finish (default `true`).
+     - `showRunsInDesktop`: add background and forked chats to the desktop app's sidebar when they finish (default `true`). They open in auto mode only if `permissions.defaultMode` is `auto` (see "Where the work runs").
      - `desktopSessionsDir`: where the desktop app keeps its chat records.
 3. Run it: `node agent/agent.mjs` (or pass a config path as the first argument).
 4. Keep it running across reboots. On Windows, `pwsh -File agent/install-windows.ps1` registers a hidden logon task that restarts on crash and logs to `agent/agent.log` (`-Uninstall` removes it). On macOS use a launchd agent, on Linux a systemd user unit.

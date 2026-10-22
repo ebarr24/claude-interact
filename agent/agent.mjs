@@ -11,7 +11,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const AGENT_VERSION = "0.8.0";
+const AGENT_VERSION = "0.8.1";
 // claude.ai gives up on a tool call after 60s, so return well before that; work that takes longer
 // keeps going and get_session picks it up.
 const MAX_WAIT_SECONDS = 45;
@@ -402,7 +402,10 @@ function startRun({ sessionId, cwd, prompt, resume, forkFrom, permissionMode, mo
     ourPids.delete(child.pid);
     setTimeout(() => runs.get(sessionId) === run && runs.delete(sessionId), FINISHED_RUN_TTL_MS).unref();
     // Every connector chat ends up in the desktop app for the user to review.
-    if (track && showRunsInDesktop) run.shownInDesktop = revealInDesktop(sessionId);
+    if (track && showRunsInDesktop) {
+      if (!desktopChats().has(sessionId)) run.desktopMode = adoptedMode(sessionId);
+      run.shownInDesktop = revealInDesktop(sessionId);
+    }
     run.finish();
   };
   child.on("error", (err) => {
@@ -531,11 +534,68 @@ function sendViaRelay({ name, startedAt, message, label }) {
 
 const showRunsInDesktop = config.showRunsInDesktop ?? true;
 
+// The desktop app gives a chat it adopts the permission mode of the last prompt in the final 256 KB
+// of its transcript, else settings' permissions.defaultMode, else manual. A long background run's
+// prompt falls outside that window, so permissions.defaultMode must be auto for it to open in auto.
+const ADOPT_TAIL_BYTES = 256 * 1024;
+
+function modeInTail(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, "r");
+    const size = fs.fstatSync(fd).size;
+    const n = Math.min(size, ADOPT_TAIL_BYTES);
+    const buf = Buffer.alloc(n);
+    fs.readSync(fd, buf, 0, n, size - n);
+    let mode;
+    for (const line of buf.toString("utf8").split("\n")) {
+      try {
+        const e = JSON.parse(line);
+        if (e.type === "user" && !e.isSidechain && typeof e.permissionMode === "string" && e.permissionMode) mode = e.permissionMode;
+      } catch {}
+    }
+    return mode;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+function settingsDefaultMode(cwd) {
+  const files = [path.join(claudeDir, "settings.json")];
+  if (cwd) files.push(path.join(cwd, ".claude", "settings.json"), path.join(cwd, ".claude", "settings.local.json"));
+  let mode;
+  for (const f of files) {
+    try {
+      const m = JSON.parse(fs.readFileSync(f, "utf8")).permissions?.defaultMode;
+      if (typeof m === "string") mode = m;
+    } catch {}
+  }
+  return mode;
+}
+
+// The mode the desktop app will open a chat it doesn't know yet in.
+function adoptedMode(sessionId) {
+  const s = findSessionFile(sessionId);
+  if (!s) return undefined;
+  const mode = modeInTail(s.file) ?? settingsDefaultMode(sessionMeta(s).cwd) ?? "default";
+  return mode === "bypassPermissions" ? "acceptEdits" : mode;
+}
+
+if (showRunsInDesktop && settingsDefaultMode() !== "auto") {
+  log(`warning: permissions.defaultMode in ${path.join(claudeDir, "settings.json")} isn't "auto", so long chats this agent adds to the desktop app open there in manual mode. Set it to "auto" to open them in auto.`);
+}
+
 // Open a chat in the desktop app: its own record when it has one (importing again could add a
 // duplicate), else import it into the sidebar. Returns false when there's nothing to open.
 function revealInDesktop(sessionId) {
   if (!relayClaude() || !findSessionFile(sessionId)) return false;
   const existing = desktopChats().get(sessionId);
+  if (!existing) {
+    const mode = adoptedMode(sessionId);
+    if (mode !== "auto") log(`desktop app will open ${sessionId} in ${mode} mode (set permissions.defaultMode to "auto")`);
+  }
   openUrl(existing ? existing.link : `claude://resume?session=${sessionId}`);
   return true;
 }
@@ -638,6 +698,10 @@ function runView(run) {
     }
     if (run.status === "error" && run.stderr.trim()) view.stderr = run.stderr.trim();
     if (run.shownInDesktop !== undefined) view.shown_in_desktop = run.shownInDesktop;
+    if (run.desktopMode && run.desktopMode !== "auto") {
+      view.desktop_mode = run.desktopMode;
+      view.desktop_note = `The desktop app opened this chat in ${run.desktopMode} mode. Tell the user; they can switch it to auto in the app, and setting permissions.defaultMode to "auto" in their Claude settings fixes it for future chats.`;
+    }
   }
   return view;
 }
