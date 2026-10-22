@@ -158,6 +158,13 @@ export class Hub extends DurableObject<Env> {
       return;
     }
 
+    // Lets agent scripts remove a leftover registration, e.g. after a test agent.
+    if (msg.type === "forget") {
+      const r = await this.forgetMachine(msg.machine);
+      ws.send(JSON.stringify({ type: "forgot", ok: !r.isError, text: r.content[0].text }));
+      return;
+    }
+
     if (msg.type === "result" && typeof msg.id === "string") {
       const p = this.pending.get(msg.id);
       if (!p) return;
@@ -196,6 +203,13 @@ export class Hub extends DurableObject<Env> {
     const stale = [...map.values()].filter((m) => now - m.lastSeen > STALE_MS && !this.socketFor(m.machine));
     if (stale.length) await this.ctx.storage.delete(stale.map((m) => `machine:${m.machine}`));
     return [...map.values()].filter((m) => !stale.includes(m)).sort((a, b) => a.machine.localeCompare(b.machine));
+  }
+
+  private async forgetMachine(machine: unknown): Promise<ToolResult> {
+    if (typeof machine !== "string") return textResult("forget_machine needs machine.", true);
+    if (this.socketFor(machine)) return textResult(`Machine "${machine}" is online; stop its agent first.`, true);
+    if (!(await this.ctx.storage.delete(`machine:${machine}`))) return textResult(`No machine "${machine}".`, true);
+    return textResult(`Forgot machine "${machine}".`);
   }
 
   private callAgent(machine: string, tool: string, args: unknown): Promise<ToolResult> {
@@ -327,13 +341,7 @@ export class Hub extends DurableObject<Env> {
       return this.callAgent(args.machine, args.tool, args.arguments ?? {});
     }
 
-    if (name === "forget_machine") {
-      const machine = args?.machine;
-      if (typeof machine !== "string") return textResult("forget_machine needs machine.", true);
-      if (this.socketFor(machine)) return textResult(`Machine "${machine}" is online; stop its agent first.`, true);
-      if (!(await this.ctx.storage.delete(`machine:${machine}`))) return textResult(`No machine "${machine}".`, true);
-      return textResult(`Forgot machine "${machine}".`);
-    }
+    if (name === "forget_machine") return this.forgetMachine(args?.machine);
 
     const i = name.indexOf(SEP);
     if (i <= 0) return textResult(`Unknown tool "${name}".`, true);
