@@ -66,7 +66,7 @@ Anyone with the key can drive your machines. Rotate it with `wrangler secret put
 
 Needs Node 22+ (24 tested) and, for desktop chats, the Claude desktop app signed in.
 
-0. Clone the repo: `gh repo clone OWNER/claude-interact` (private; sign in with `gh auth login` first). Only `agent/` is needed on a machine; `git pull` later picks up agent updates, then restart the agent.
+0. Clone the repo: `gh repo clone ebarr24/claude-interact` (private; sign in with `gh auth login` first). Only `agent/` is needed on a machine; `git pull` later picks up agent updates, then restart the agent.
 1. Make sure the standalone `claude` CLI is signed in. The desktop app signs in separately, so check with `claude auth status`. For an always-on agent, `claude setup-token` creates a long-lived token; put it in the agent's environment as `CLAUDE_CODE_OAUTH_TOKEN`.
 2. `cp agent/config.example.json agent/config.json` and edit:
    - `machine`: unique per machine (letters, digits, `-`, up to 24 chars). Two agents with the same name kick each other off, and the replaced one exits.
