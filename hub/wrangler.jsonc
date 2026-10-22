@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "claude-interact-hub",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  "routes": [{ "pattern": "duet.ethanbarr.net", "custom_domain": true }],
+  "workers_dev": false,
+  "preview_urls": false,
+  "durable_objects": {
+    "bindings": [{ "name": "HUB", "class_name": "Hub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }]
+  // Secrets (set with `wrangler secret put`, or in .dev.vars for local dev):
+  //   MCP_API_KEY - key the connector sends in the X-API-Key or Authorization: Bearer header
+  //   AGENT_TOKEN - bearer token machine agents present when connecting
+}

@@ -1,0 +1,13 @@
+{
+  "hubUrl": "https://duet.ethanbarr.net",
+  "agentToken": "<same value as the hub's AGENT_TOKEN secret>",
+  "machine": "desktop",
+  "allowedRoots": ["~/code"],
+  "projectDirs": ["~/code"],
+  "projects": { "Duet": "~/Duet" },
+  "defaultProject": "Duet",
+  "permissionModes": {
+    "default": "acceptEdits",
+    "allowed": ["default", "acceptEdits", "plan", "auto", "dontAsk"]
+  }
+}

@@ -1,0 +1,7 @@
+node_modules/
+.wrangler/
+.dev.vars
+agent/config.json
+connector.txt
+agent/agent.log
+agent/run-hidden.vbs
