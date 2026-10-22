@@ -11,7 +11,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const AGENT_VERSION = "0.8.1";
+const AGENT_VERSION = "0.9.0";
 // claude.ai gives up on a tool call after 60s, so return well before that; work that takes longer
 // keeps going and get_session picks it up.
 const MAX_WAIT_SECONDS = 45;
@@ -175,7 +175,7 @@ function sessionMeta(s) {
   const tail = tailStart === 0 ? head : parseLines(readSlice(s.file, tailStart, size - tailStart));
   const lastOf = (entries, type) => entries.findLast((e) => e.type === type);
   const title = lastOf(tail, "custom-title")?.customTitle ?? lastOf(head, "custom-title")?.customTitle;
-  const lastPrompt = lastOf(tail, "last-prompt")?.lastPrompt ?? lastOf(head, "last-prompt")?.lastPrompt;
+  const lastPrompt = stripHeader(lastOf(tail, "last-prompt")?.lastPrompt ?? lastOf(head, "last-prompt")?.lastPrompt ?? "");
   const withCwd = head.find((e) => e.cwd) ?? tail.find((e) => e.cwd);
   return {
     session_id: s.sessionId,
@@ -310,8 +310,8 @@ async function readTurns(file) {
       if (!text || text.startsWith("<command-") || text.startsWith("<local-command")) continue;
       // A message relayed by cross-session messaging: show just what was sent.
       const relayed = text.match(/<cross-session-message[^>]*>\n?([\s\S]*?)\n?<\/cross-session-message>/);
-      if (relayed) turns.push({ role: "user", at: e.timestamp, text: relayed[1].replace(RELAY_HEADER, "").trim(), relayed: true });
-      else turns.push({ role: "user", at: e.timestamp, text });
+      if (relayed) turns.push({ role: "user", at: e.timestamp, text: stripHeader(relayed[1]), relayed: true });
+      else turns.push({ role: "user", at: e.timestamp, text: stripHeader(text) });
     } else if (e.type === "assistant" && Array.isArray(content)) {
       let turn = turns.at(-1);
       if (turn?.role !== "assistant") turns.push((turn = { role: "assistant", at: e.timestamp, text: "", tools: [] }));
@@ -345,7 +345,7 @@ const childEnv = Object.fromEntries(
 
 // New session (sessionId), continue one (resume), or continue a copy of forkFrom saved as sessionId.
 // `track: false` keeps the run out of `runs` (a desktop chat's setup turn, tracked by its desktop run).
-function startRun({ sessionId, cwd, prompt, resume, forkFrom, permissionMode, model, effort, title, track = true }) {
+function startRun({ sessionId, cwd, prompt, resume, forkFrom, permissionMode, model, effort, title, notify, track = true }) {
   const args = ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", permissionMode];
   if (forkFrom) args.push("--resume", forkFrom, "--fork-session", "--session-id", sessionId);
   else args.push(resume ? "--resume" : "--session-id", sessionId);
@@ -362,6 +362,8 @@ function startRun({ sessionId, cwd, prompt, resume, forkFrom, permissionMode, mo
     reply: "",
     result: null,
     stderr: "",
+    title,
+    notify,
   };
   run.done = new Promise((resolve) => (run.finish = resolve));
   if (track) runs.set(sessionId, run);
@@ -407,6 +409,7 @@ function startRun({ sessionId, cwd, prompt, resume, forkFrom, permissionMode, mo
       run.shownInDesktop = revealInDesktop(sessionId);
     }
     run.finish();
+    if (track) sendNotice(run);
   };
   child.on("error", (err) => {
     run.stderr += `\nspawn failed: ${err.message}`;
@@ -434,8 +437,19 @@ async function waitFor(run, seconds) {
 // message, inside the app with all of the app's tools. The agent can't send one itself (only
 // Claude sessions have SendMessage), so it starts a tiny headless Claude that sends the text.
 
-const RELAY_HEADER =
-  "[Sent from Claude Duet through the user's claude-interact connector. Reply in this chat as usual; the connector reads your reply here, so there is no need to message back.]";
+// Every message the connector delivers starts with this, so the session knows who is asking and
+// that the thinking is its job: the caller passes on the user's request but can't see this machine.
+const CONNECTOR_NOTE =
+  "Claude Duet, the user's assistant on claude.ai, sent this through the user's claude-interact connector. " +
+  "Duet runs in Anthropic's cloud and reaches this machine only through the connector, so it doesn't have this project's files or your context; " +
+  "it passes on the user's request, what it has observed, and anything you need to know about it. " +
+  "You do the thinking: work out the approach and the design yourself, treating the request as the goal rather than a spec. " +
+  "Duet reads your final message and relays it to the user, so end with what you did, anything you need from the user, and anything that failed or was denied.";
+const BACKGROUND_HEADER = `[${CONNECTOR_NOTE}]`;
+const RELAY_HEADER = `[${CONNECTOR_NOTE} Reply in this chat as usual; the connector reads your reply here, so there is no need to message back.]`;
+// Headers this and earlier versions put in front of messages, hidden when reading chats back.
+const HEADER_RE = /^\s*\[(Sent from Claude Duet|Claude Duet, the user's assistant)[^\]]*\]\s*/;
+const stripHeader = (text) => text.replace(HEADER_RE, "").trim();
 const SETUP_PROMPT =
   "This chat was opened from Claude Duet. The user's request arrives in the next message, relayed by the claude-interact connector. For now, reply with just: Ready.";
 // Sender name for a relayed message, e.g. "Duet: speed up the build".
@@ -618,7 +632,7 @@ async function ensureLoadedInDesktop(sessionId) {
 // Relay `message` into a chat in the desktop app and follow its reply in the transcript. `prepare`
 // (creating the chat, loading it in the app) runs inside the run, so callers can return the
 // session_id before it finishes.
-function startDesktopRun({ sessionId, cwd, message, label, prepare }) {
+function startDesktopRun({ sessionId, cwd, message, label, notify, prepare }) {
   const run = {
     sessionId,
     cwd,
@@ -629,6 +643,8 @@ function startDesktopRun({ sessionId, cwd, message, label, prepare }) {
     reply: "",
     result: null,
     stderr: "",
+    title: label,
+    notify,
   };
   run.done = new Promise((resolve) => (run.finish = resolve));
   runs.set(sessionId, run);
@@ -639,6 +655,7 @@ function startDesktopRun({ sessionId, cwd, message, label, prepare }) {
     run.finishedAt = new Date().toISOString();
     setTimeout(() => runs.get(sessionId) === run && runs.delete(sessionId), FINISHED_RUN_TTL_MS).unref();
     run.finish();
+    sendNotice(run);
   };
 
   (async () => {
@@ -684,13 +701,84 @@ function startDesktopRun({ sessionId, cwd, message, label, prepare }) {
   return run;
 }
 
+// ---------- notices ----------
+// When a run ends and its result hasn't gone back in a tool result yet, the agent sends a short
+// notice into the caller's Claude Code cloud session (claude -p --cloud), which wakes it, so it
+// doesn't have to poll get_session. The hub keeps the latest session id the caller registered.
+
+const NOTICE_DELAY_MS = 5000; // lets a tool call that was waiting on the run return it first
+let latestNotify = null; // pushed by the hub
+const CLOUD_SESSION_RE = /^(session|cse)_[A-Za-z0-9]{8,64}$/;
+
+function sendToCloud(sessionId, text) {
+  return new Promise((resolve) => {
+    const child = spawn(relayClaude() ?? claudeCommand(), ["-p", "--cloud", sessionId, "--output-format", "json"], {
+      cwd: os.homedir(),
+      env: childEnv,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let out = "";
+    const timer = setTimeout(() => child.kill(), 60_000);
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (out += d));
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      resolve({ ok: false, detail: e.message });
+    });
+    child.on("exit", () => {
+      clearTimeout(timer);
+      let r = null;
+      try {
+        r = JSON.parse(out.split("\n")[0]);
+      } catch {}
+      resolve(r?.ok ? { ok: true } : { ok: false, detail: truncate(r?.error ?? out.trim() ?? "no output", 300) });
+    });
+    child.stdin.end(text);
+  });
+}
+
+function noticeText(run) {
+  const title = desktopChats().get(run.sessionId)?.title ?? run.title;
+  const what = { done: "finished", error: "failed", stopped: "was stopped" }[run.status] ?? run.status;
+  const lines = [
+    `[claude-interact] A run on ${machine} ${what}${title ? `: "${title}"` : ""}. Automatic notice from the connector, not a message from the user.`,
+    `session_id: ${run.sessionId} (${run.ranIn ?? "background"})`,
+  ];
+  const reply = (run.result?.text ?? run.reply ?? "").trim();
+  if (reply) lines.push("", "End of its reply:", reply.length > 1500 ? "…" + reply.slice(-1500) : reply);
+  if (run.status === "error" && run.stderr.trim()) lines.push("", `Error: ${truncate(run.stderr.trim(), 500)}`);
+  if (run.result?.permission_denials?.length) lines.push("", `Denied: ${run.result.permission_denials.join(", ")}`);
+  lines.push("", `Read the full reply with ${machine}__get_session.`);
+  return lines.join("\n");
+}
+
+async function sendNotice(run) {
+  if (run.notify === "none") return;
+  await sleep(NOTICE_DELAY_MS);
+  if (run.seen) return;
+  // The hub's latest id first: the caller's chat may have moved to a new session since the run started.
+  const targets = [...new Set([latestNotify, run.notify])].filter((id) => CLOUD_SESSION_RE.test(id ?? ""));
+  if (!targets.length) return;
+  const text = noticeText(run);
+  for (const to of targets) {
+    const r = await sendToCloud(to, text);
+    run.notice = { to, sent: r.ok, ...(r.ok ? {} : { error: r.detail }) };
+    log(`notice for ${run.sessionId} to ${to}: ${r.ok ? "sent" : r.detail}`);
+    if (r.ok) return;
+  }
+}
+
 function runView(run) {
   const view = { session_id: run.sessionId, status: run.status, started_at: run.startedAt, finished_at: run.finishedAt, cwd: run.cwd };
   view.ran_in = run.ranIn ?? "background";
   if (run.status === "running") {
-    view.note = "Still working. Call get_session with this session_id (optionally with wait_seconds) to get the reply.";
+    view.note =
+      "Still working. If you passed notify_session (or registered with set_notify_session), you'll get a notice when it ends; otherwise call get_session with this session_id, optionally with wait_seconds.";
     if (run.reply) view.latest_text = truncate(run.reply);
   } else {
+    run.seen = true; // the caller has the result, so no notice
+    if (run.notice) view.notice = run.notice;
     view.reply = truncate(run.result?.text ?? run.reply ?? "");
     if (run.result) {
       const { text, ...rest } = run.result;
@@ -731,6 +819,14 @@ const where = {
     `"desktop": a full Claude desktop app chat with the app's own tools. Choose it deliberately when the work needs the app's built-in browser, front-end or UI work that should be checked visually, or other app-only tools; it is slower (setup and relay), the app must be running, and anything needing approval waits for the user in the app. ` +
     `Either way the chat ends up in the desktop app's sidebar for the user to review.`,
 };
+const notify_session = {
+  type: "string",
+  description:
+    "Your own Claude Code session id (session_...). If the run ends before you've seen its result, the machine sends a short notice into that session, which wakes you; then read the reply with get_session instead of polling. " +
+    'It also becomes the id every later run notifies (same as set_notify_session), so pass it on every call. Omit it to use the id registered last; "none" sends no notice for this run.',
+};
+const promptNote =
+  "Pass on the user's request in their words, what you've observed, and what the session should know about you; let the session work out the approach. ";
 
 const tools = {
   list_projects: {
@@ -796,11 +892,12 @@ const tools = {
   start_session: {
     description:
       "Start a new chat on this machine in a project and give it a first message. Returns the session_id and, if it finishes within wait_seconds, Claude's reply. " +
-      "Runs headless by default, in auto mode; pass where: \"desktop\" when the work needs the desktop app (its browser, visual checks of front-end work). Either way the chat lands in the desktop app's sidebar.",
+      "Runs headless by default, in auto mode; pass where: \"desktop\" when the work needs the desktop app (its browser, visual checks of front-end work). Either way the chat lands in the desktop app's sidebar. " +
+      "The session does the thinking: give it the user's request and context, not a solution. Pass notify_session to get a notice when the run ends instead of polling.",
     inputSchema: {
       type: "object",
       properties: {
-        prompt: { type: "string", description: "The first message for the new chat." },
+        prompt: { type: "string", description: "The first message for the new chat. " + promptNote },
         project: { type: "string", description: "Project name from list_projects. Omit for the default project (general chats)." },
         title: {
           type: "string",
@@ -810,11 +907,12 @@ const tools = {
         where,
         permission_mode,
         wait_seconds,
+        notify_session,
       },
       required: ["prompt"],
       additionalProperties: false,
     },
-    async run({ prompt, project, title, model, where: target = defaultWhere, permission_mode: mode, wait_seconds: wait }) {
+    async run({ prompt, project, title, model, where: target = defaultWhere, permission_mode: mode, wait_seconds: wait, notify_session: notify }) {
       if (!prompt?.trim()) throw new Error("prompt is empty");
       if (mode !== undefined && !permissionModes.includes(mode)) throw new Error(`permission_mode must be one of ${permissionModes.join(", ")}`);
       const { name, dir } = resolveProject(project);
@@ -822,7 +920,16 @@ const tools = {
       const chatTitle = title?.trim() || prompt.trim().split("\n")[0].slice(0, 60);
 
       if (target !== "desktop") {
-        const run = startRun({ sessionId, cwd: dir, prompt, resume: false, permissionMode: mode ?? defaultPermissionMode, model, title: chatTitle });
+        const run = startRun({
+          sessionId,
+          cwd: dir,
+          prompt: `${BACKGROUND_HEADER}\n\n${prompt}`,
+          resume: false,
+          permissionMode: mode ?? defaultPermissionMode,
+          model,
+          title: chatTitle,
+          notify,
+        });
         await waitFor(run, wait);
         return { project: name, ...runView(run) };
       }
@@ -847,7 +954,7 @@ const tools = {
         if (setup.status !== "done") throw new Error(`Setting up the chat failed: ${setup.stderr.trim() || setup.status}`);
         await ensureLoadedInDesktop(sessionId);
       };
-      const run = startDesktopRun({ sessionId, cwd: dir, message: prompt, label: chatTitle, prepare });
+      const run = startDesktopRun({ sessionId, cwd: dir, message: prompt, label: chatTitle, notify, prepare });
       await waitFor(run, wait);
       return { project: name, title: chatTitle, ...runView(run) };
     },
@@ -890,7 +997,7 @@ const tools = {
       type: "object",
       properties: {
         session_id: { type: "string" },
-        message: { type: "string" },
+        message: { type: "string", description: promptNote.trim() },
         label: {
           type: "string",
           description: "A short name (3-6 words) for this request. A desktop chat shows it as the message's sender. Defaults to the start of the message.",
@@ -899,6 +1006,7 @@ const tools = {
         model: { type: "string", description: "Optional model alias for background runs." },
         permission_mode,
         wait_seconds,
+        notify_session,
         fork: {
           type: "boolean",
           description:
@@ -909,7 +1017,7 @@ const tools = {
       required: ["session_id", "message"],
       additionalProperties: false,
     },
-    async run({ session_id, message, label, where: target = defaultWhere, model, permission_mode: mode = defaultPermissionMode, wait_seconds: wait, fork = false }) {
+    async run({ session_id, message, label, where: target = defaultWhere, model, permission_mode: mode = defaultPermissionMode, wait_seconds: wait, notify_session: notify, fork = false }) {
       if (!message?.trim()) throw new Error("message is empty");
       if (!permissionModes.includes(mode)) throw new Error(`permission_mode must be one of ${permissionModes.join(", ")}`);
       if (runs.get(session_id)?.status === "running") {
@@ -920,7 +1028,7 @@ const tools = {
       const { cwd } = sessionMeta(s);
       if (!cwd || !isAllowedDir(cwd)) throw new Error(`Session folder ${cwd} is outside the allowed roots`);
       if (fork) {
-        const run = startRun({ sessionId: randomUUID(), forkFrom: session_id, cwd, prompt: message, permissionMode: mode, model });
+        const run = startRun({ sessionId: randomUUID(), forkFrom: session_id, cwd, prompt: `${BACKGROUND_HEADER}\n\n${message}`, permissionMode: mode, model, title: label, notify });
         await waitFor(run, wait);
         return { forked_from: session_id, ...runView(run) };
       }
@@ -930,19 +1038,22 @@ const tools = {
           cwd,
           message,
           label: label?.trim() || undefined,
+          notify,
           prepare: () => ensureLoadedInDesktop(session_id),
         });
         await waitFor(run, wait);
         return runView(run);
       }
-      const run = startRun({ sessionId: session_id, cwd, prompt: message, resume: true, permissionMode: mode, model });
+      const run = startRun({ sessionId: session_id, cwd, prompt: `${BACKGROUND_HEADER}\n\n${message}`, resume: true, permissionMode: mode, model, title: label, notify });
       await waitFor(run, wait);
       return runView(run);
     },
   },
 
   get_session: {
-    description: "Read a chat: its most recent messages, whether it is loaded in the desktop app, and the status of any reply this connector is running in it. Use wait_seconds to wait for a running reply.",
+    description:
+      "Read a chat: its most recent messages, whether it is loaded in the desktop app, and the status of any reply this connector is running in it. Use wait_seconds to wait for a running reply. " +
+      "With a notify_session registered, wait for the run's notice rather than calling this over and over.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1072,7 +1183,13 @@ function connect() {
       return;
     }
     if (msg.type === "pong") lastPong = Date.now();
-    else if (msg.type === "welcome") log(`connected to hub as "${msg.machine}" with ${msg.tools} tools`);
+    else if (msg.type === "welcome") {
+      latestNotify = msg.notify_session ?? null;
+      log(`connected to hub as "${msg.machine}" with ${msg.tools} tools${latestNotify ? `; notices go to ${latestNotify}` : ""}`);
+    } else if (msg.type === "notify-session") {
+      latestNotify = msg.notify_session ?? null;
+      log(`notices go to ${latestNotify ?? "nobody"}`);
+    }
     else if (msg.type === "error") log(`hub error: ${msg.error}`);
     else if (msg.type === "call") {
       log(`call ${msg.tool}`);

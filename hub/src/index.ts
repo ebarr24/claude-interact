@@ -31,7 +31,7 @@ interface ToolResult {
 type JsonRpcRequest = { jsonrpc: "2.0"; id?: string | number | null; method: string; params?: any };
 
 const SERVER_NAME = "claude-interact-hub";
-const SERVER_VERSION = "0.4.0";
+const SERVER_VERSION = "0.5.0";
 const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const MACHINE_NAME_RE = /^[A-Za-z0-9-]{1,24}$/;
 const SEP = "__";
@@ -40,6 +40,9 @@ const SEP = "__";
 const CALL_TIMEOUT_MS = 150_000;
 // Machines offline longer than this are forgotten (tools and all); an agent re-registers on reconnect.
 const STALE_MS = 3 * 24 * 60 * 60 * 1000;
+// Claude Code cloud session ids (claude.ai/code). Agents send one a notice when a run ends.
+const CLOUD_SESSION_RE = /^(session|cse)_[A-Za-z0-9]{8,64}$/;
+const NOTIFY_KEY = "notify:session";
 
 const INSTRUCTIONS = `This connector reaches the user's own computers ("machines"). Each machine runs an agent that
 registers tools, exposed here as <machine>${SEP}<tool>. Call list_machines first to see which machines
@@ -47,6 +50,19 @@ are online and what they can do. If a machine's tools are missing from your tool
 after you connected), use run_machine_tool with the machine and tool name instead.
 
 How the user wants these tools used:
+- You convey; the session on the machine does the thinking. You don't have the machine's files, the project's
+  history or the session's tools, so don't design the solution yourself. Give the session the user's request
+  in their own words (you may frame and tidy it), what you have observed (results, errors, how the user
+  reacted), and what it needs to know about you: what you are, what you can and can't see, and how its reply
+  reaches you and the user. Leave the approach, the design and the decisions to the session. Add ideas of
+  your own only when the user asks you to, and mark them as suggestions.
+- Wait for a notice instead of polling. Pass your own Claude Code session id (session_...) as notify_session
+  on start_session and send_message, or call set_notify_session once when your session starts. When a run
+  ends and you haven't seen its result yet (it finished, failed, or stopped to ask for something), the
+  machine sends a short notice into your session, which wakes you; then read the reply with get_session.
+  The connector notifies the latest id it was given, so a session that takes over your chat registers its
+  own id the same way. Use wait_seconds on the call that starts a run, and after that don't call get_session
+  over and over while you wait.
 - Decide where each chat runs. Headless ("background") is the default because it is faster and doesn't
   depend on the relay: use it for code, config and repo work, smaller changes and fixes. Choose "desktop"
   (a full Claude desktop app chat) deliberately when the work needs the app's built-in browser, front-end
@@ -57,7 +73,6 @@ How the user wants these tools used:
 - All work ends up in the desktop app so the user can review it afterwards: background and forked runs are
   added to the app's sidebar when they finish. Forks are fine, but merge them back: when a fork's work is done,
   send the original chat a summary of what it did.
-- Long work keeps going after a tool returns "running"; follow up with get_session.
 - When the user gives you a standing rule about how to use these tools, default to suggesting it as a change
   to this connector (its tools or these instructions) rather than saving it to your own memory.`;
 
@@ -154,7 +169,8 @@ export class Hub extends DurableObject<Env> {
       ws.serializeAttachment({ machine });
       const record: MachineRecord = { machine, tools, info: msg.info ?? {}, lastSeen: Date.now() };
       await this.ctx.storage.put(`machine:${machine}`, record);
-      ws.send(JSON.stringify({ type: "welcome", machine, tools: tools.length }));
+      const notify = (await this.ctx.storage.get<string>(NOTIFY_KEY)) ?? null;
+      ws.send(JSON.stringify({ type: "welcome", machine, tools: tools.length, notify_session: notify }));
       return;
     }
 
@@ -210,6 +226,41 @@ export class Hub extends DurableObject<Env> {
     if (this.socketFor(machine)) return textResult(`Machine "${machine}" is online; stop its agent first.`, true);
     if (!(await this.ctx.storage.delete(`machine:${machine}`))) return textResult(`No machine "${machine}".`, true);
     return textResult(`Forgot machine "${machine}".`);
+  }
+
+  // The cloud session agents notify when a run ends. Every agent gets the latest one, so a run
+  // started by an earlier session of the same chat still reaches the session that took over.
+  private async setNotifySession(id: unknown): Promise<ToolResult> {
+    if (id === undefined) {
+      const current = await this.ctx.storage.get<string>(NOTIFY_KEY);
+      return textResult(current ? `Runs notify ${current}.` : "No session is registered for notices.");
+    }
+    if (id === "none") {
+      await this.ctx.storage.delete(NOTIFY_KEY);
+      this.broadcast({ type: "notify-session", notify_session: null });
+      return textResult("Cleared. Runs send no notices until a session registers again.");
+    }
+    if (typeof id !== "string" || !CLOUD_SESSION_RE.test(id)) {
+      return textResult('session_id must be a Claude Code cloud session id (session_... or cse_...), or "none".', true);
+    }
+    if ((await this.ctx.storage.get<string>(NOTIFY_KEY)) !== id) {
+      await this.ctx.storage.put(NOTIFY_KEY, id);
+      this.broadcast({ type: "notify-session", notify_session: id });
+    }
+    return textResult(`Runs on every machine notify ${id} when they end before you've seen the result.`);
+  }
+
+  // A notify_session passed to any machine tool also registers it.
+  private async noteNotifySession(args: any): Promise<void> {
+    const id = args?.notify_session;
+    if (typeof id === "string" && CLOUD_SESSION_RE.test(id)) await this.setNotifySession(id);
+  }
+
+  private broadcast(msg: object): void {
+    const data = JSON.stringify(msg);
+    for (const ws of this.ctx.getWebSockets()) {
+      if (this.machineOf(ws) && ws.readyState === WebSocket.OPEN) ws.send(data);
+    }
   }
 
   private callAgent(machine: string, tool: string, args: unknown): Promise<ToolResult> {
@@ -309,6 +360,18 @@ export class Hub extends DurableObject<Env> {
           additionalProperties: false,
         },
       },
+      {
+        name: "set_notify_session",
+        description:
+          "Register your own Claude Code session id (session_...) so runs on the user's machines send you a notice when they end, instead of you polling get_session. " +
+          "Passing notify_session to start_session or send_message does the same. Register when your session starts: your id changes when a new session takes over your chat, and the latest id registered is the one notified. " +
+          'Omit session_id to see the registered id; pass "none" to stop notices.',
+        inputSchema: {
+          type: "object",
+          properties: { session_id: { type: "string", description: 'Your current session id (session_...), or "none".' } },
+          additionalProperties: false,
+        },
+      },
     ];
     for (const m of await this.machines()) {
       for (const t of m.tools) {
@@ -338,13 +401,16 @@ export class Hub extends DurableObject<Env> {
       if (typeof args?.machine !== "string" || typeof args?.tool !== "string") {
         return textResult("run_machine_tool needs machine and tool.", true);
       }
+      await this.noteNotifySession(args.arguments);
       return this.callAgent(args.machine, args.tool, args.arguments ?? {});
     }
 
     if (name === "forget_machine") return this.forgetMachine(args?.machine);
+    if (name === "set_notify_session") return this.setNotifySession(args?.session_id);
 
     const i = name.indexOf(SEP);
     if (i <= 0) return textResult(`Unknown tool "${name}".`, true);
+    await this.noteNotifySession(args);
     return this.callAgent(name.slice(0, i), name.slice(i + SEP.length), args);
   }
 }

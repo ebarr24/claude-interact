@@ -11,7 +11,7 @@ Claude Duet ──MCP over HTTPS──▶ hub (Cloudflare Worker + Durable Objec
                          claude -p / --resume
 ```
 
-- **hub/** is the connector you add in Claude. It holds a WebSocket from each machine and exposes each machine's tools as `<machine>__<tool>`, plus `list_machines`, `run_machine_tool` (for machines that connected after Duet loaded its tool list) and `forget_machine` (removes an offline machine, such as a test agent; an agent-token socket can send `{"type":"forget","machine":...}` for the same thing). Machines offline for 3 days are dropped on their own and re-register when their agent reconnects.
+- **hub/** is the connector you add in Claude. It holds a WebSocket from each machine and exposes each machine's tools as `<machine>__<tool>`, plus `list_machines`, `run_machine_tool` (for machines that connected after Duet loaded its tool list), `set_notify_session` (where runs send their notices, see below) and `forget_machine` (removes an offline machine, such as a test agent; an agent-token socket can send `{"type":"forget","machine":...}` for the same thing). Machines offline for 3 days are dropped on their own and re-register when their agent reconnects.
 - **agent/** runs on each machine. Single file, no dependencies, Node 22+. Each agent declares its own tools, so different machines can offer different tools through the same connector.
 
 ## Tools each agent offers today
@@ -41,9 +41,19 @@ When the desktop app adds a chat to its sidebar, it takes the mode of the last p
 
 The tool descriptions and the hub's server instructions tell Duet to decide per request: background for code, config and repo work and smaller fixes; desktop when the work needs the app's browser, visual checks of front-end work, or other app-only tools. They also tell Duet to merge forks back with a summary, and to suggest standing rules as changes to this connector rather than saving them to its own memory.
 
+Duet passes on requests; the session on the machine does the thinking. The guidance tells Duet to send the user's words, what it has observed and what the session should know about Duet, and to leave the approach and design to the session. Every message the connector delivers starts with a short note saying the same to the session: who sent it, that Duet can't see the machine, that the design is the session's to work out, and that its final message is what Duet relays. `get_session` and `list_sessions` hide that note.
+
 Both use the desktop app's bundled CLI (`%APPDATA%\Claude\claude-code\<version>`) when it exists, so they stay current with the app; `claudeCommand` overrides that.
 
-Tools return within 45 seconds (`wait_seconds` is capped there because claude.ai gives up on a tool call after 60). Longer work, including setting up a new desktop chat, keeps going: the result says `status: "running"` with the session_id, and Duet follows up with `get_session`.
+Tools return within 45 seconds (`wait_seconds` is capped there because claude.ai gives up on a tool call after 60). Longer work, including setting up a new desktop chat, keeps going: the result says `status: "running"` with the session_id.
+
+### Notices instead of polling
+
+When a run ends (it finished, failed or was stopped) and no tool result has handed its outcome back yet, the agent sends a short notice into the caller's Claude Code cloud session with `claude -p --cloud <session_id>`. The notice wakes Duet. It names the machine, the chat and the session_id, quotes the end of the reply and lists any denied tools, and Duet reads the full reply with `get_session`. The send goes straight to the cloud session, with no model call.
+
+- Duet registers its own session id (`session_...`) with `set_notify_session`, or by passing `notify_session` to `start_session` / `send_message` (or inside `run_machine_tool`'s arguments). The hub stores the latest id and pushes it to every agent. A run then notifies the latest id, even when a new session has taken over Duet's chat since the run started. `notify_session: "none"` turns notices off for one run.
+- A result Duet already got (because the run finished within `wait_seconds`, or through `get_session`) sends no notice. The agent waits 5 seconds after a run ends before sending one.
+- The run's `notice` field shows where the notice went and whether it was sent. Sending needs a Claude Code CLI that supports `--cloud` (the desktop app's bundled one does) and a sign-in to the same claude.ai account as Duet.
 
 ## Setup
 
