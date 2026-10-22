@@ -11,7 +11,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const AGENT_VERSION = "0.5.0";
+const AGENT_VERSION = "0.6.0";
 const MAX_WAIT_SECONDS = 120; // keep under the hub's 150s call timeout
 const DEFAULT_WAIT_SECONDS = 45;
 const FINISHED_RUN_TTL_MS = 60 * 60 * 1000;
@@ -419,6 +419,11 @@ const RELAY_HEADER =
   "[Sent from Claude Duet through the user's claude-interact connector. Reply in this chat as usual; the connector reads your reply here, so there is no need to message back.]";
 const SETUP_PROMPT =
   "This chat was opened from Claude Duet. The user's request arrives in the next message, relayed by the claude-interact connector. For now, reply with just: Ready.";
+// Sender name for a relayed message, e.g. "Duet: speed up the build".
+function relayLabel(text) {
+  const words = text.replace(/\s+/g, " ").trim();
+  return "Duet: " + (words.length > 40 ? words.slice(0, 40).replace(/\s\S*$/, "") + "…" : words);
+}
 const DESKTOP_LOAD_TIMEOUT_MS = 45_000;
 const DESKTOP_RUN_TIMEOUT_MS = 30 * 60 * 1000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -458,7 +463,8 @@ function relayClaude() {
 const defaultWhere = config.defaultWhere ?? (relayClaude() ? "desktop" : "background");
 
 // Deliver `message` to the loaded chat named `name` via a headless Claude's SendMessage.
-function sendViaRelay({ name, startedAt, message }) {
+// `label` names the relay session, which the chat shows as the message's sender.
+function sendViaRelay({ name, startedAt, message, label }) {
   const cmd = relayClaude();
   if (!cmd) return Promise.resolve({ ok: false, detail: "the Claude desktop app's bundled Claude Code wasn't found on this machine" });
   const minutes = startedAt ? Math.max(0, Math.round((Date.now() - startedAt) / 60000)) : null;
@@ -474,6 +480,8 @@ function sendViaRelay({ name, startedAt, message }) {
     "MESSAGE>>>",
   ].join("\n");
   const args = ["-p", "--model", "haiku", "--tools", "ListAgents,SendMessage", "--allowedTools", "ListAgents SendMessage", "--no-session-persistence", "--output-format", "json"];
+  if (label) args.push("--name", label);
+  const started = Date.now();
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { cwd: os.homedir(), env: childEnv, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     let out = "";
@@ -485,7 +493,7 @@ function sendViaRelay({ name, startedAt, message }) {
       clearTimeout(timer);
       resolve({ ok: false, detail: `relay spawn failed: ${e.message}` });
     });
-    child.on("exit", () => {
+    child.on("exit", (code, signal) => {
       clearTimeout(timer);
       let result = "";
       try {
@@ -494,7 +502,10 @@ function sendViaRelay({ name, startedAt, message }) {
         result = out.trim() || err.trim();
       }
       const ok = /RELAY_SENT/.test(result) && !/RELAY_ERROR/.test(result);
-      resolve({ ok, detail: truncate(result || "no output from the relay", 500) });
+      const secs = Math.round((Date.now() - started) / 1000);
+      const detail = result || `no output from the relay (exit ${signal ?? code} after ${secs}s)`;
+      if (!ok) log(`relay to "${name}" not confirmed: ${truncate(detail, 300)}`);
+      resolve({ ok, detail: truncate(detail, 500) });
     });
     child.stdin.end(prompt);
   });
@@ -517,7 +528,7 @@ async function ensureLoadedInDesktop(sessionId) {
 }
 
 // Relay `message` into a chat the desktop app has loaded and follow its reply in the transcript.
-function startDesktopRun({ sessionId, file, cwd, message }) {
+function startDesktopRun({ sessionId, file, cwd, message, label }) {
   const run = {
     sessionId,
     cwd,
@@ -546,8 +557,17 @@ function startDesktopRun({ sessionId, file, cwd, message }) {
     const name = live.name ?? desktopChats().get(sessionId)?.title;
     if (!name) return settle("error", "This loaded chat has no title, so the relay can't address it.");
     const baseline = (await readTurns(file)).length;
-    const sent = await sendViaRelay({ name, startedAt: live.startedAt, message: `${RELAY_HEADER}\n\n${message}` });
-    if (!sent.ok) return settle("error", `The relay couldn't deliver the message: ${sent.detail}`);
+    const arrived = async () => (await readTurns(file)).slice(baseline).some((t) => t.relayed);
+    const sent = await sendViaRelay({ name, startedAt: live.startedAt, message: `${RELAY_HEADER}\n\n${message}`, label: relayLabel(label ?? message) });
+    // The relay's own report can go missing even when the message got through; the chat's transcript is the proof.
+    if (!sent.ok) {
+      let delivered = await arrived();
+      for (let i = 0; i < 5 && !delivered; i++) {
+        await sleep(2000);
+        delivered = await arrived();
+      }
+      if (!delivered) return settle("error", `The relay couldn't deliver the message: ${sent.detail}`);
+    }
 
     const deadline = Date.now() + DESKTOP_RUN_TIMEOUT_MS;
     while (Date.now() < deadline) {
@@ -675,7 +695,10 @@ const tools = {
       properties: {
         prompt: { type: "string", description: "The first message for the new chat." },
         project: { type: "string", description: "Project name from list_projects. Omit for the default project (general chats)." },
-        title: { type: "string", description: "Display name for the chat (defaults to the start of the prompt)." },
+        title: {
+          type: "string",
+          description: "A short title (3-6 words) that says what this request is about. It names the chat in the desktop app's sidebar and shows as the sender of the prompt. Defaults to the start of the prompt.",
+        },
         model: { type: "string", description: "Optional model alias, e.g. opus, sonnet. A desktop chat defaults to the model of the user's latest desktop chat." },
         where,
         permission_mode,
@@ -715,7 +738,7 @@ const tools = {
       if (setup.status !== "done") return { project: name, step: "setup", ...runView(setup) };
       await ensureLoadedInDesktop(sessionId);
       const s = findSessionFile(sessionId);
-      const run = startDesktopRun({ sessionId, file: s.file, cwd: dir, message: prompt });
+      const run = startDesktopRun({ sessionId, file: s.file, cwd: dir, message: prompt, label: chatTitle });
       const left = Math.max(0, Number(wait ?? DEFAULT_WAIT_SECONDS) - (Date.now() - startedAt) / 1000);
       await waitFor(run, Math.floor(left));
       return { project: name, title: chatTitle, ...runView(run) };
@@ -760,6 +783,10 @@ const tools = {
       properties: {
         session_id: { type: "string" },
         message: { type: "string" },
+        label: {
+          type: "string",
+          description: "A short name (3-6 words) for this request. A desktop chat shows it as the message's sender. Defaults to the start of the message.",
+        },
         where,
         model: { type: "string", description: "Optional model alias for background runs." },
         permission_mode,
@@ -772,7 +799,7 @@ const tools = {
       required: ["session_id", "message"],
       additionalProperties: false,
     },
-    async run({ session_id, message, where: target = defaultWhere, model, permission_mode: mode = defaultPermissionMode, wait_seconds: wait, fork = false }) {
+    async run({ session_id, message, label, where: target = defaultWhere, model, permission_mode: mode = defaultPermissionMode, wait_seconds: wait, fork = false }) {
       if (!message?.trim()) throw new Error("message is empty");
       if (!permissionModes.includes(mode)) throw new Error(`permission_mode must be one of ${permissionModes.join(", ")}`);
       if (runs.get(session_id)?.status === "running") {
@@ -790,7 +817,7 @@ const tools = {
       if (liveSessions().get(session_id) || target === "desktop") {
         const started = Date.now();
         await ensureLoadedInDesktop(session_id);
-        const run = startDesktopRun({ sessionId: session_id, file: s.file, cwd, message });
+        const run = startDesktopRun({ sessionId: session_id, file: s.file, cwd, message, label: label?.trim() || undefined });
         await waitFor(run, Math.floor(Math.max(0, Number(wait ?? DEFAULT_WAIT_SECONDS) - (Date.now() - started) / 1000)));
         return runView(run);
       }

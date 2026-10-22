@@ -31,7 +31,8 @@ Claude Duet ──MCP over HTTPS──▶ hub (Cloudflare Worker + Durable Objec
 - **`desktop`** (the default when the desktop app is installed): the chat is a full Claude desktop app chat, with the app's own tools such as the built-in browser.
   - New chats: a one-line setup turn creates the session, the agent opens it in the app, and the real prompt is relayed in. The app adopts the setup turn's model and permission mode, so the agent uses the settings of your most recent chat made in the app (override with `desktopDefaults`, or `model` / `permission_mode` per call).
   - Existing chats: the message is relayed into the chat, loading it in the app first if needed.
-  - The relay is Claude Code's cross-session messaging, sent by a short Haiku run (`ListAgents` + `SendMessage`). The chat sees the message as coming from another Claude session.
+  - The relay is Claude Code's cross-session messaging, sent by a short Haiku run (`ListAgents` + `SendMessage`). The chat sees the message as coming from another Claude session named "Duet: <label>": the `title` for new chats, the `label` for `send_message`, or the start of the message.
+  - Delivery is confirmed from the chat's transcript, so a relay run that ends without reporting still counts when the message arrived.
 - **`background`**: a headless `claude -p` run on the machine, saved to the chat. No desktop-only tools.
 
 Both use the desktop app's bundled CLI (`%APPDATA%\Claude\claude-code\<version>`) when it exists, so they stay current with the app; `claudeCommand` overrides that.
