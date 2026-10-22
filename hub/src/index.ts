@@ -31,7 +31,7 @@ interface ToolResult {
 type JsonRpcRequest = { jsonrpc: "2.0"; id?: string | number | null; method: string; params?: any };
 
 const SERVER_NAME = "claude-interact-hub";
-const SERVER_VERSION = "0.2.0";
+const SERVER_VERSION = "0.3.0";
 const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const MACHINE_NAME_RE = /^[A-Za-z0-9-]{1,24}$/;
 const SEP = "__";
@@ -45,11 +45,13 @@ are online and what they can do. If a machine's tools are missing from your tool
 after you connected), use run_machine_tool with the machine and tool name instead.
 
 How the user wants these tools used:
-- Pick where each chat runs. "desktop" (a full Claude desktop app chat) for front-end, UI and design work,
-  visual verification, and anything that needs the app's own tools such as its built-in browser.
-  "background" (headless Claude Code) for code, config and repo work and quick one-off tasks.
-- A background run can't ask for approval; anything its permission mode doesn't allow is denied. Pick a
-  mode that lets it finish, and tell the user what was denied (permission_denials).
+- Decide where each chat runs. Headless ("background") is the default because it is faster and doesn't
+  depend on the relay: use it for code, config and repo work, smaller changes and fixes. Choose "desktop"
+  (a full Claude desktop app chat) deliberately when the work needs the app's built-in browser, front-end
+  or UI work that should be verified visually, or other app-only tools. A message to a chat the desktop app
+  already has open always goes there.
+- Every run uses auto mode: leave permission_mode unset unless the user asks for another mode. A background
+  run can't ask for approval, so tell the user about anything that was denied (permission_denials).
 - All work ends up in the desktop app so the user can review it afterwards: background and forked runs are
   added to the app's sidebar when they finish. Forks are fine, but merge them back: when a fork's work is done,
   send the original chat a summary of what it did.

@@ -7,7 +7,6 @@
   "projects": { "Duet": "~/Duet" },
   "defaultProject": "Duet",
   "permissionModes": {
-    "default": "acceptEdits",
     "allowed": ["default", "acceptEdits", "plan", "auto", "dontAsk"]
   }
 }

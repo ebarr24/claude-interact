@@ -11,7 +11,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
-const AGENT_VERSION = "0.7.0";
+const AGENT_VERSION = "0.8.0";
 // claude.ai gives up on a tool call after 60s, so return well before that; work that takes longer
 // keeps going and get_session picks it up.
 const MAX_WAIT_SECONDS = 45;
@@ -33,7 +33,11 @@ const claudeCommand = () => config.claudeCommand ?? relayClaude() ?? "claude";
 const claudeDir = config.claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
 const allowedRoots = (config.allowedRoots ?? []).map((r) => path.resolve(r.replace(/^~(?=$|[\\/])/, os.homedir())));
 const permissionModes = config.permissionModes?.allowed ?? ["default", "acceptEdits", "plan", "auto", "dontAsk"];
-const defaultPermissionMode = config.permissionModes?.default ?? "acceptEdits";
+// Every run the connector starts or continues uses auto mode unless the caller picks another mode.
+const defaultPermissionMode = "auto";
+if (config.permissionModes?.default && config.permissionModes.default !== defaultPermissionMode) {
+  process.stderr.write(`note: permissionModes.default ("${config.permissionModes.default}") is ignored; runs default to auto\n`);
+}
 
 const expandHome = (p) => path.resolve(p.replace(/^~(?=$|[\\/])/, os.homedir()));
 const projectDirs = (config.projectDirs ?? []).map(expandHome);
@@ -42,7 +46,7 @@ const defaultProject = config.defaultProject ?? null;
 
 if (!hubUrl || !agentToken) fail("config needs hubUrl and agentToken");
 if (allowedRoots.length === 0) fail("config needs at least one entry in allowedRoots");
-if (!permissionModes.includes(defaultPermissionMode)) fail("permissionModes.default must be in permissionModes.allowed");
+if (!permissionModes.includes(defaultPermissionMode)) fail("permissionModes.allowed must include auto");
 if (defaultProject && !explicitProjects[defaultProject]) fail(`defaultProject "${defaultProject}" must be listed in projects`);
 
 function fail(msg) {
@@ -263,7 +267,8 @@ function desktopChats() {
 }
 
 // A chat the desktop app adopts keeps the model and permission mode of its first turn, so desktop
-// chats start with the settings of the user's most recent chat made in the app (or config.desktopDefaults).
+// chats start with the model and effort of the user's most recent chat made in the app (or
+// config.desktopDefaults), and in auto mode.
 function desktopDefaults() {
   let latest = null;
   for (const c of desktopChats().values()) {
@@ -273,7 +278,6 @@ function desktopDefaults() {
   return {
     model: typeof s.model === "string" ? s.model : undefined,
     effort: typeof s.effort === "string" ? s.effort : undefined,
-    permissionMode: permissionModes.includes(s.permissionMode) ? s.permissionMode : defaultPermissionMode,
   };
 }
 
@@ -472,7 +476,8 @@ function relayClaude() {
   return null;
 }
 
-const defaultWhere = config.defaultWhere ?? (relayClaude() ? "desktop" : "background");
+// Headless by default: it's faster and doesn't depend on the relay. Desktop is a deliberate choice.
+const defaultWhere = config.defaultWhere ?? "background";
 
 // Deliver `message` to the loaded chat named `name` via a headless Claude's SendMessage.
 // `label` names the relay session, which the chat shows as the message's sender.
@@ -649,16 +654,17 @@ const permission_mode = {
   type: "string",
   enum: permissionModes,
   description:
-    `Permission mode. A background run can't ask anyone for approval: anything its mode doesn't allow is denied (listed in permission_denials), so pick a mode that lets the work finish (default ${defaultPermissionMode}; "auto" covers most work), and tell the user what was denied. ` +
-    `A new desktop chat defaults to the mode of the user's latest desktop chat; an existing desktop chat keeps its own mode.`,
+    `Permission mode (default ${defaultPermissionMode}, for background runs, forks and new desktop chats alike; the user wants every run in auto mode, so leave it unset unless they ask otherwise). ` +
+    `A background run can't ask anyone for approval: anything its mode doesn't allow is denied (listed in permission_denials); tell the user what was denied. ` +
+    `A desktop chat that already exists keeps its own mode.`,
 };
 const where = {
   type: "string",
   enum: ["desktop", "background"],
   description:
-    `Where Claude does the work (default ${defaultWhere}). ` +
-    `"desktop": inside the Claude desktop app, as a full desktop chat with the app's own tools such as its built-in browser. Use it for front-end, UI and design work, visual verification, and anything that needs the app's tools; the app must be running, and anything needing approval waits for the user in the app. ` +
-    `"background": a headless Claude Code run, for code, config and repo work and quick one-off tasks that don't need the app. It can't ask for approval (see permission_mode). ` +
+    `Where Claude does the work (default ${defaultWhere}). Decide per request; the default is headless because it is faster and doesn't depend on the relay. ` +
+    `"background": a headless Claude Code run. Use it for code, config and repo work, smaller changes and fixes, and anything that doesn't need the desktop app. ` +
+    `"desktop": a full Claude desktop app chat with the app's own tools. Choose it deliberately when the work needs the app's built-in browser, front-end or UI work that should be checked visually, or other app-only tools; it is slower (setup and relay), the app must be running, and anything needing approval waits for the user in the app. ` +
     `Either way the chat ends up in the desktop app's sidebar for the user to review.`,
 };
 
@@ -726,7 +732,7 @@ const tools = {
   start_session: {
     description:
       "Start a new chat on this machine in a project and give it a first message. Returns the session_id and, if it finishes within wait_seconds, Claude's reply. " +
-      "With where: \"desktop\" it becomes a Claude desktop app chat that does the work inside the app; with \"background\" it runs headless.",
+      "Runs headless by default, in auto mode; pass where: \"desktop\" when the work needs the desktop app (its browser, visual checks of front-end work). Either way the chat lands in the desktop app's sidebar.",
     inputSchema: {
       type: "object",
       properties: {
@@ -767,7 +773,7 @@ const tools = {
           cwd: dir,
           prompt: SETUP_PROMPT,
           resume: false,
-          permissionMode: mode ?? app.permissionMode,
+          permissionMode: mode ?? defaultPermissionMode,
           model: model ?? app.model,
           effort: model ? undefined : app.effort,
           title: chatTitle,

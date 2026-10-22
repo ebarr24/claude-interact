@@ -28,14 +28,16 @@ Claude Duet ──MCP over HTTPS──▶ hub (Cloudflare Worker + Durable Objec
 
 ### Where the work runs
 
-- **`desktop`** (the default when the desktop app is installed): the chat is a full Claude desktop app chat, with the app's own tools such as the built-in browser.
-  - New chats: a one-line setup turn creates the session, the agent opens it in the app, and the real prompt is relayed in. The app adopts the setup turn's model and permission mode, so the agent uses the settings of your most recent chat made in the app (override with `desktopDefaults`, or `model` / `permission_mode` per call).
+Every run the connector starts or continues uses **auto mode** unless the call names another `permission_mode`. A desktop chat that already exists keeps its own mode.
+
+- **`background`** (the default): a headless `claude -p` run on the machine, saved to the chat. Faster, and doesn't depend on the relay. No desktop-only tools. When it finishes, the chat (or fork) is added to the desktop app's sidebar so every connector run can be reviewed there; this opens the app on that chat.
+- **`desktop`** (chosen deliberately): the chat is a full Claude desktop app chat, with the app's own tools such as the built-in browser. A message to a chat the app already has loaded always goes here.
+  - New chats: a one-line setup turn creates the session, the agent opens it in the app, and the real prompt is relayed in. The app adopts the setup turn's model and permission mode, so the agent uses the model and effort of your most recent chat made in the app (override with `desktopDefaults`, or `model` per call) and auto mode.
   - Existing chats: the message is relayed into the chat, loading it in the app first if needed.
   - The relay is Claude Code's cross-session messaging, sent by a short Haiku run (`ListAgents` + `SendMessage`). The chat sees the message as coming from another Claude session named "Duet: <label>": the `title` for new chats, the `label` for `send_message`, or the start of the message.
   - Delivery is confirmed from the chat's transcript, so a relay run that ends without reporting still counts when the message arrived.
-- **`background`**: a headless `claude -p` run on the machine, saved to the chat. No desktop-only tools. When it finishes, the chat (or fork) is added to the desktop app's sidebar so every connector run can be reviewed there; this opens the app on that chat.
 
-The tool descriptions and the hub's server instructions tell Duet when to use which: desktop for front-end, UI and visual verification or anything needing the app's tools; background for code, config and repo work. They also tell Duet to merge forks back with a summary, and to suggest standing rules as changes to this connector rather than saving them to its own memory.
+The tool descriptions and the hub's server instructions tell Duet to decide per request: background for code, config and repo work and smaller fixes; desktop when the work needs the app's browser, visual checks of front-end work, or other app-only tools. They also tell Duet to merge forks back with a summary, and to suggest standing rules as changes to this connector rather than saving them to its own memory.
 
 Both use the desktop app's bundled CLI (`%APPDATA%\Claude\claude-code\<version>`) when it exists, so they stay current with the app; `claudeCommand` overrides that.
 
@@ -76,11 +78,11 @@ Needs Node 22+ (24 tested) and, for desktop chats, the Claude desktop app signed
    - `allowedRoots`: only sessions and folders under these are listed or usable.
    - `projectDirs`: folders whose subfolders become projects when they look like code (git repo, `package.json`, Python files, `CLAUDE.md`, a Worker config, ...).
    - `projects` / `defaultProject`: extra named projects, and the one used when Duet doesn't name a project. The default project's folder is created when first used.
-   - `permissionModes`: the default mode for background runs, and the modes any run may use. `bypassPermissions` is left out on purpose; add it only if you mean it.
+   - `permissionModes.allowed`: the modes a call may pick; must include `auto`, which every run defaults to. `bypassPermissions` is left out on purpose; add it only if you mean it.
    - Optional:
      - `claudeCommand`: the CLI for runs (default: the desktop app's bundled one, else `claude` on PATH).
      - `relayClaudeCommand`: the CLI for relaying (needs 2.1.234+ on Windows).
-     - `defaultWhere`: `desktop` or `background`.
+     - `defaultWhere`: `background` (default) or `desktop`.
      - `desktopDefaults`: `{ "model", "effort", "permissionMode" }` for new desktop chats.
      - `showRunsInDesktop`: add background and forked chats to the desktop app's sidebar when they finish (default `true`).
      - `desktopSessionsDir`: where the desktop app keeps its chat records.
@@ -96,7 +98,7 @@ cd hub && printf 'MCP_API_KEY=dev\nAGENT_TOKEN=dev\n' > .dev.vars && npx wrangle
 
 ## Limits worth knowing
 
-- **Desktop runs need the app running and signed in.** Anything the chat's permission mode doesn't allow waits for you to approve it in the app; a relayed message can't approve it. In `acceptEdits`, even opening a page in the built-in browser waits for approval, so `auto` suits desktop chats.
+- **Desktop runs need the app running and signed in.** Anything the chat's permission mode doesn't allow waits for you to approve it in the app; a relayed message can't approve it. New desktop chats start in auto mode; an older chat in `acceptEdits` waits for approval even to open a page in the built-in browser.
 - **Relay timing.** A desktop chat that's mid-turn gets the message after its current turn. The connector tracks a desktop reply only while the agent is running; after a restart, `get_session` still shows the chat's messages.
 - **Desktop chat records.** The agent reads the desktop app's per-chat records (`%APPDATA%\Claude\claude-code-sessions`) for titles, archived state, settings and links. That format is internal to the app; the agent skips records it can't read.
 - **Headless permissions.** Nobody is there to approve tool use in background runs, so anything the permission mode doesn't allow is denied. Denied tools come back in `permission_denials`.
