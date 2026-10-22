@@ -33,11 +33,13 @@ Claude Duet ──MCP over HTTPS──▶ hub (Cloudflare Worker + Durable Objec
   - Existing chats: the message is relayed into the chat, loading it in the app first if needed.
   - The relay is Claude Code's cross-session messaging, sent by a short Haiku run (`ListAgents` + `SendMessage`). The chat sees the message as coming from another Claude session named "Duet: <label>": the `title` for new chats, the `label` for `send_message`, or the start of the message.
   - Delivery is confirmed from the chat's transcript, so a relay run that ends without reporting still counts when the message arrived.
-- **`background`**: a headless `claude -p` run on the machine, saved to the chat. No desktop-only tools.
+- **`background`**: a headless `claude -p` run on the machine, saved to the chat. No desktop-only tools. When it finishes, the chat (or fork) is added to the desktop app's sidebar so every connector run can be reviewed there; this opens the app on that chat.
+
+The tool descriptions and the hub's server instructions tell Duet when to use which: desktop for front-end, UI and visual verification or anything needing the app's tools; background for code, config and repo work. They also tell Duet to merge forks back with a summary, and to suggest standing rules as changes to this connector rather than saving them to its own memory.
 
 Both use the desktop app's bundled CLI (`%APPDATA%\Claude\claude-code\<version>`) when it exists, so they stay current with the app; `claudeCommand` overrides that.
 
-Long replies return `status: "running"` and Duet follows up with `get_session`.
+Tools return within 45 seconds (`wait_seconds` is capped there because claude.ai gives up on a tool call after 60). Longer work, including setting up a new desktop chat, keeps going: the result says `status: "running"` with the session_id, and Duet follows up with `get_session`.
 
 ## Setup
 
@@ -80,6 +82,7 @@ Needs Node 22+ (24 tested) and, for desktop chats, the Claude desktop app signed
      - `relayClaudeCommand`: the CLI for relaying (needs 2.1.234+ on Windows).
      - `defaultWhere`: `desktop` or `background`.
      - `desktopDefaults`: `{ "model", "effort", "permissionMode" }` for new desktop chats.
+     - `showRunsInDesktop`: add background and forked chats to the desktop app's sidebar when they finish (default `true`).
      - `desktopSessionsDir`: where the desktop app keeps its chat records.
 3. Run it: `node agent/agent.mjs` (or pass a config path as the first argument).
 4. Keep it running across reboots. On Windows, `pwsh -File agent/install-windows.ps1` registers a hidden logon task that restarts on crash and logs to `agent/agent.log` (`-Uninstall` removes it). On macOS use a launchd agent, on Linux a systemd user unit.

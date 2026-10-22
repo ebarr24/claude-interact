@@ -31,7 +31,7 @@ interface ToolResult {
 type JsonRpcRequest = { jsonrpc: "2.0"; id?: string | number | null; method: string; params?: any };
 
 const SERVER_NAME = "claude-interact-hub";
-const SERVER_VERSION = "0.1.0";
+const SERVER_VERSION = "0.2.0";
 const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const MACHINE_NAME_RE = /^[A-Za-z0-9-]{1,24}$/;
 const SEP = "__";
@@ -43,8 +43,19 @@ const INSTRUCTIONS = `This connector reaches the user's own computers ("machines
 registers tools, exposed here as <machine>${SEP}<tool>. Call list_machines first to see which machines
 are online and what they can do. If a machine's tools are missing from your tool list (it registered
 after you connected), use run_machine_tool with the machine and tool name instead.
-Claude Code chats started or continued through these tools run in the background on that machine and are saved
-there, so the user sees them in the Claude desktop app when they open the chat.`;
+
+How the user wants these tools used:
+- Pick where each chat runs. "desktop" (a full Claude desktop app chat) for front-end, UI and design work,
+  visual verification, and anything that needs the app's own tools such as its built-in browser.
+  "background" (headless Claude Code) for code, config and repo work and quick one-off tasks.
+- A background run can't ask for approval; anything its permission mode doesn't allow is denied. Pick a
+  mode that lets it finish, and tell the user what was denied (permission_denials).
+- All work ends up in the desktop app so the user can review it afterwards: background and forked runs are
+  added to the app's sidebar when they finish. Forks are fine, but merge them back: when a fork's work is done,
+  send the original chat a summary of what it did.
+- Long work keeps going after a tool returns "running"; follow up with get_session.
+- When the user gives you a standing rule about how to use these tools, default to suggesting it as a change
+  to this connector (its tools or these instructions) rather than saving it to your own memory.`;
 
 function textResult(text: string, isError = false): ToolResult {
   return { content: [{ type: "text", text }], ...(isError ? { isError: true } : {}) };
